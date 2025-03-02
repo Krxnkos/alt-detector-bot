@@ -17,7 +17,8 @@ const robloxAPI = axios.create({
     timeout: 5000,
     headers: {
         'Accept': 'application/json',
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'User-Agent': 'Alt-Account-Checker/1.0'
     }
 });
 
@@ -38,7 +39,15 @@ const rest = new REST({ version: '10' }).setToken(process.env.TOKEN!);
 // Error handler utility
 const handleApiError = (error: unknown, context: string): null => {
     if (error instanceof AxiosError) {
-        console.error(`${context} - Status: ${error.response?.status}, Message: ${error.message}`);
+        const status = error.response?.status;
+        const message = error.response?.data?.message || error.message;
+        console.error(`${context} - Status: ${status}, Message: ${message}`);
+        
+        // Log additional details for debugging
+        if (error.config) {
+            console.error('Request URL:', error.config.url);
+            console.error('Request Method:', error.config.method);
+        }
     } else {
         console.error(`${context}:`, error);
     }
@@ -170,6 +179,77 @@ interface AltScore {
     confidence: number;
 }
 
+// Update the RobloxBadgeWithAward interface
+interface RobloxBadgeWithAward {
+    awardedDate: string;
+    badgeId: number;
+    id: number;
+    name: string;
+}
+
+// Add this function to analyze badge patterns
+async function analyzeBadgePattern(userId: number): Promise<{
+    badgeCount: number;
+    recentBadges: number;
+    badgesPerMonth: number;
+}> {
+    try {
+        const response = await robloxAPI.get<{ data: RobloxBadgeWithAward[] }>(
+            `https://badges.roblox.com/v1/users/${userId}/badges`
+        );
+
+        const badges = response.data.data;
+        const now = new Date();
+        const thirtyDaysAgo = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000));
+
+        // Get recent badges
+        const recentBadges = badges.filter(badge => {
+            const awardDate = new Date(badge.awardedDate);
+            return !isNaN(awardDate.getTime()) && awardDate > thirtyDaysAgo;
+        }).length;
+
+        // Calculate badges per month more reliably
+        if (badges.length === 0) {
+            return {
+                badgeCount: 0,
+                recentBadges: 0,
+                badgesPerMonth: 0
+            };
+        }
+
+        const validDates = badges
+            .map(badge => new Date(badge.awardedDate))
+            .filter(date => !isNaN(date.getTime()));
+
+        if (validDates.length === 0) {
+            return {
+                badgeCount: badges.length,
+                recentBadges,
+                badgesPerMonth: 0
+            };
+        }
+
+        const oldestBadgeDate = new Date(Math.min(...validDates.map(d => d.getTime())));
+        const monthsSinceFirstBadge = Math.max(
+            1,
+            (now.getTime() - oldestBadgeDate.getTime()) / (30 * 24 * 60 * 60 * 1000)
+        );
+
+        return {
+            badgeCount: badges.length,
+            recentBadges,
+            badgesPerMonth: Math.round((badges.length / monthsSinceFirstBadge) * 100) / 100
+        };
+    } catch (error) {
+        if (error instanceof AxiosError && error.response?.status === 404) {
+            console.error('User badges not found or API endpoint changed');
+            return { badgeCount: 0, recentBadges: 0, badgesPerMonth: 0 };
+        }
+        handleApiError(error, 'Error analyzing badge pattern');
+        return { badgeCount: 0, recentBadges: 0, badgesPerMonth: 0 };
+    }
+}
+
 // Add this interface after other interfaces
 interface RobloxAvatarData {
     scales: {
@@ -183,84 +263,81 @@ interface RobloxAvatarData {
     playerAvatarType: string;
     emotes: any[];
     assets: any[];
+    defaultShirtApplied: boolean;
+    defaultPantsApplied: boolean;
 }
 
 // Modify calculateAltLikelihood function parameters and logic
 function calculateAltLikelihood(
-    accountAge: number, 
-    badgeCount: number, 
-    friendCount: number, 
-    hasDefaultAvatar: boolean
+    username: string,
+    accountAge: number,
+    badgeAnalysis: { badgeCount: number; recentBadges: number; badgesPerMonth: number },
+    friendCount: number
 ): AltScore {
     const reasons: string[] = [];
     let score = 0;
     let confidenceScore = 0;
 
-    // Account age scoring (max 50 points)
-    if (accountAge < 7) {
-        score += 50;
-        confidenceScore += 40;
-        reasons.push("🚨 Account created less than a week ago");
-    } else if (accountAge < 30) {
-        score += 40;
-        confidenceScore += 30;
-        reasons.push("⚠️ Account less than a month old");
-    } else if (accountAge < 90) {
-        score += 25;
-        confidenceScore += 20;
-        reasons.push("📅 Account less than 3 months old");
-    } else if (accountAge < 180) {
-        score += 10;
-        confidenceScore += 10;
-        reasons.push("ℹ️ Account less than 6 months old");
-    }
-
-    // Badge count scoring (max 50 points)
-    if (badgeCount === 0) {
-        score += 50;
-        confidenceScore += 40;
-        reasons.push("🚨 No badges earned");
-    } else if (badgeCount < 5) {
-        score += 35;
-        confidenceScore += 30;
-        reasons.push("⚠️ Very few badges (<5)");
-    } else if (badgeCount < 15) {
-        score += 20;
-        confidenceScore += 20;
-        reasons.push("📊 Low badge count (<15)");
-    } else if (badgeCount < 25) {
-        score += 10;
-        confidenceScore += 10;
-        reasons.push("ℹ️ Moderate badge count (<25)");
-    }
-
-    // Friend count scoring (max 25 points)
-    if (friendCount === 0) {
+    // Username check (max 25 points)
+    if (username.toLowerCase().includes('alt')) {
         score += 25;
         confidenceScore += 25;
+        reasons.push("🚨 Username contains 'alt'");
+    }
+
+    // Account age scoring (max 35 points)
+    if (accountAge < 7) {
+        score += 35;
+        confidenceScore += 35;
+        reasons.push("🚨 Account created less than a week ago");
+    } else if (accountAge < 30) {
+        score += 25;
+        confidenceScore += 25;
+        reasons.push("⚠️ Account less than a month old");
+    } else if (accountAge < 90) {
+        score += 15;
+        confidenceScore += 15;
+        reasons.push("📅 Account less than 3 months old");
+    }
+
+    // Badge pattern scoring (max 25 points)
+    if (badgeAnalysis.badgeCount === 0) {
+        if (accountAge > 30) {
+            score += 25;
+            confidenceScore += 25;
+            reasons.push("🚨 No badges earned despite account age");
+        } else {
+            score += 15;
+            confidenceScore += 15;
+            reasons.push("⚠️ No badges earned (new account)");
+        }
+    } else {
+        if (badgeAnalysis.badgesPerMonth < 1) {
+            score += 15;
+            confidenceScore += 15;
+            reasons.push("📊 Very low badge earning rate (<1 per month)");
+        }
+        if (badgeAnalysis.recentBadges === 0 && accountAge > 30) {
+            score += 10;
+            confidenceScore += 10;
+            reasons.push("⚠️ No recent badge activity");
+        }
+    }
+
+    // Friend count scoring (max 15 points)
+    if (friendCount === 0) {
+        score += 15;
+        confidenceScore += 15;
         reasons.push("🚫 No friends added");
     } else if (friendCount < 5) {
-        score += 20;
-        confidenceScore += 20;
-        reasons.push("👥 Very few friends (<5)");
-    } else if (friendCount < 10) {
         score += 10;
         confidenceScore += 10;
-        reasons.push("👥 Low friend count (<10)");
+        reasons.push("👥 Very few friends (<5)");
     }
 
-    // Avatar scoring (max 25 points)
-    if (hasDefaultAvatar) {
-        score += 25;
-        confidenceScore += 20;
-        reasons.push("👕 Using default avatar");
-    }
-
-    // Adjust final score calculation to account for new maximum
     const finalScore = Math.min(100, score);
     let severity: 'LOW' | 'MEDIUM' | 'HIGH' = 'LOW';
 
-    // Adjust thresholds for new scoring
     if (finalScore > 70) severity = 'HIGH';
     else if (finalScore > 35) severity = 'MEDIUM';
 
@@ -279,11 +356,15 @@ async function isDefaultAvatar(userId: number): Promise<boolean> {
             `https://avatar.roblox.com/v1/users/${userId}/avatar`
         );
         
-        // Check if using default avatar (few or no assets/customizations)
-        const hasCustomizations = response.data.assets.length > 0;
-        const hasDefaultScales = Object.values(response.data.scales).every(scale => scale === 1);
+        // More thorough default avatar checks
+        const isDefaultOutfit = response.data.defaultShirtApplied && response.data.defaultPantsApplied;
+        const hasNoAssets = response.data.assets.length === 0;
+        const hasDefaultScales = Object.values(response.data.scales).every(scale => 
+            Math.abs(scale - 1.0) < 0.01  // Allow for small floating point differences
+        );
         
-        return !hasCustomizations && hasDefaultScales;
+        // Consider it default if either condition is true
+        return (isDefaultOutfit && hasDefaultScales) || hasNoAssets;
     } catch (error) {
         handleApiError(error, 'Error checking avatar status');
         return false;
@@ -301,15 +382,14 @@ async function handleCheckCommand(interaction: CommandInteraction) {
             return interaction.editReply('❌ Could not find the specified Roblox user.');
         }
 
-        const [accountAge, badges, thumbnail, friendCount, hasDefaultAvatar] = await Promise.all([
+        const [accountAge, badgeAnalysis, thumbnail, friendCount] = await Promise.all([
             getAccountAge(userId),
-            getUserBadges(userId),
+            analyzeBadgePattern(userId),
             getUserThumbnail(userId),
-            getFriendCount(userId),
-            isDefaultAvatar(userId)
+            getFriendCount(userId)
         ]);
 
-        const altAnalysis = calculateAltLikelihood(accountAge, badges.length, friendCount, hasDefaultAvatar);
+        const altAnalysis = calculateAltLikelihood(username, accountAge, badgeAnalysis, friendCount);
 
         const getSeverityEmoji = (severity: string) => {
             switch (severity) {
@@ -333,9 +413,9 @@ async function handleCheckCommand(interaction: CommandInteraction) {
                 fields: [
                     { name: '👤 User ID', value: userId.toString(), inline: true },
                     { name: '📅 Account Age', value: `${accountAge.toLocaleString()} days`, inline: true },
-                    { name: '🏅 Badges', value: `${badges.length.toLocaleString()}`, inline: true },
+                    { name: '🏅 Badges', value: `${badgeAnalysis.badgeCount.toLocaleString()} (${badgeAnalysis.badgesPerMonth}/month)`, inline: true },
                     { name: '👥 Friends', value: `${friendCount.toLocaleString()}`, inline: true },
-                    { name: '👕 Avatar', value: hasDefaultAvatar ? 'Default' : 'Custom', inline: true },
+                    { name: '📈 Recent Activity', value: `${badgeAnalysis.recentBadges} badges in 30 days`, inline: true },
                     { name: '⚠️ Alt Score', value: `${altAnalysis.score}% (${altAnalysis.confidence}% confidence)`, inline: false },
                     { name: '📝 Analysis', value: altAnalysis.reasons.join('\n') || '✅ No suspicious patterns detected', inline: false }
                 ],
