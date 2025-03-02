@@ -1,0 +1,21 @@
+{
+  "name": "alt_account_check",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node --experimental-specifier-resolution=node dist/check.js",
+    "dev": "tsc && node --experimental-specifier-resolution=node dist/check.js",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "axios": "^1.8.1",
+    "discord.js": "^14.18.0",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.22",
+    "rimraf": "^5.0.10",
+    "typescript": "^5.8.2"
+  }
+}
